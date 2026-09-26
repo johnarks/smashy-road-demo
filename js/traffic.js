@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { LINES, linePos, lanesFor, headingFor, lightPhase, axisGo, HALF } from './world.js';
+import { LINES, linePos, lanesFor, headingFor, lightPhase, axisGo, roadWidth, HALF } from './world.js';
 
 // Traffic: ambient cars driving the lane network. They obey traffic lights,
 // queue behind each other, turn at intersections, brake for a stopped player,
@@ -119,17 +119,33 @@ export class Traffic {
       const { j, d } = this.nextNode(car);
       let want = car.cruise;
 
-      // red / yellow light: stop at the line
-      if (j >= 0 && d < 32 && !axisGo(phase, car.axis)) {
-        want = Math.min(want, Math.max(0, (d - 7) * 0.9));
-      }
-      // queue behind cars ahead in the same lane
+      // queue behind cars ahead in the same lane (needed for the box check below)
       const bucket = buckets.get(car.axis + car.line + ':' + car.laneIdx);
       for (let k = 0; k < bucket.length; k++) {
         const o = bucket[k];
         if (o === car) continue;
         const gap = (o.t - car.t) * car.dir;
         if (gap > 0 && gap < 14) want = Math.min(want, o.speed * Math.max(0, Math.min(1, (gap - 4.5) / 9)));
+      }
+
+      // intersection discipline: stop BEFORE the box, never inside it.
+      // stopD is measured from the intersection edge (wide avenues need more room).
+      // Once committed past the line, clear the box instead of stopping in it.
+      if (j >= 0 && d < 34) {
+        const stopD = Math.max(roadWidth(car.line), roadWidth(j)) / 2 + 3.5;
+        if (d > stopD - 1) {
+          let hold = !axisGo(phase, car.axis);   // red / yellow: wait
+          if (!hold) {
+            // green, but a stopped queue is backed up across the box: don't enter
+            for (let k = 0; k < bucket.length; k++) {
+              const o = bucket[k];
+              if (o === car) continue;
+              const gap = (o.t - car.t) * car.dir;
+              if (gap > d - 4 && gap < d + 16 && o.speed < 2) { hold = true; break; }
+            }
+          }
+          if (hold) want = Math.min(want, Math.max(0, (d - stopD) * 0.9));
+        }
       }
 
       // --- the player as a threat ---

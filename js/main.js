@@ -59,7 +59,29 @@ function spawnCop(x, z) {
   const mesh = makeCarDetailed({ police: true });
   scene.add(mesh);
   const dx = player.x - x, dz = player.z - z;
-  cops.push({ mesh, x, z, heading: Math.atan2(dx, dz), speed: 10, stun: 0, grace: 0, spin: 0, spinVel: 0 });
+  cops.push({
+    mesh, x, z, heading: Math.atan2(dx, dz), speed: 10, stun: 0, grace: 0, spin: 0, spinVel: 0,
+    skill: 0.85 + Math.random() * 0.3,   // turn-rate variance: no two cops drive alike
+    lag: Math.random() * 0.15,           // reaction-time variance
+  });
+}
+
+// recent player positions — cops aim at where you WERE (~0.35s ago),
+// like a human reacting, instead of mirroring your every twitch
+const trail = [];
+function delayedPlayerPos(delay) {
+  const target = elapsed - delay;
+  for (let i = trail.length - 1; i >= 0; i--) {
+    if (trail[i].t <= target) return trail[i];
+  }
+  return trail[0] || player;
+}
+
+function dampAngle(cur, target, lambda, dt) {
+  let d = target - cur;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return cur + d * (1 - Math.exp(-lambda * dt));
 }
 
 function copSpawnFar() {
@@ -82,6 +104,8 @@ function reset() {
   const p = lanePos('x', 5, lane, -60);
   player.x = p.x; player.z = p.z; player.heading = 0; player.speed = 0;
   elapsed = 0; distance = 0; brakeHeld = 0; steer = 0;
+  trail.length = 0;
+  camHeading = 0; curDist = 12.5;
   for (const c of cops) scene.remove(c.mesh);
   cops = [];
   traffic.scatter(player.x, player.z, 60);
@@ -196,13 +220,15 @@ function updateCops(dt) {
       c.mesh.position.set(c.x, 0, c.z);
       c.mesh.rotation.y = c.heading + c.spin;
     } else {
-      let desired = Math.atan2(dx, dz);
+      // human-like pursuit: aim at the delayed position, with personal skill
+      const aim = delayedPlayerPos(0.35 + c.lag);
+      let desired = Math.atan2(aim.x - c.x, aim.z - c.z);
       const px = c.x + Math.sin(c.heading) * 7, pz = c.z + Math.cos(c.heading) * 7;
       if (hitsSolids(px, pz, 2.5)) desired = c.heading + 1.35;          // buildings/poles
       else if (traffic.near(px, pz, 5)) desired = c.heading - 1.1;     // traffic
       if (Math.abs(px) > BOUND - 5 || Math.abs(pz) > BOUND - 5) desired = Math.atan2(-c.x, -c.z);
 
-      c.heading = turnToward(c.heading, desired, COP.turn * dt);
+      c.heading = turnToward(c.heading, desired, COP.turn * c.skill * dt);
       c.speed = Math.min(c.speed + COP.accel * dt, COP.maxSpeed);
       c.x += Math.sin(c.heading) * c.speed * dt;
       c.z += Math.cos(c.heading) * c.speed * dt;
@@ -243,9 +269,12 @@ function updateCops(dt) {
 }
 
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(0, 0, 0);
-let curFov = 62, curDist = 12.5;
+let curFov = 62, curDist = 12.5, camHeading = 0;
 function updateCamera(dt) {
-  const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
+  // the camera follows a DAMPED heading that lags the car: micro-adjustments
+  // don't whip the view around, but sustained turns still swing it with you
+  camHeading = dampAngle(camHeading, player.heading, 3.5, dt);
+  const fx = Math.sin(camHeading), fz = Math.cos(camHeading);
   // pull back when the cops are right on your bumper — more room to see the chase
   const wantDist = 12.5 + (nearestCop < 18 ? (18 - nearestCop) * 0.45 : 0);
   curDist += (Math.min(wantDist, 19) - curDist) * (1 - Math.exp(-dt * 3));
@@ -280,6 +309,8 @@ function tick() {
 
   if (state === 'playing') {
     elapsed += dt;
+    trail.push({ x: player.x, z: player.z, t: elapsed });
+    while (trail.length > 2 && trail[0].t < elapsed - 0.7) trail.shift();
     updatePlayer(dt);
     if (state === 'playing') {
       updateCops(dt);
