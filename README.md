@@ -3,7 +3,7 @@
 A tiny Smashy Road-style chase demo: drive around a procedural low-poly city,
 outrun the cops, and don't hit anything — one crash and the run is over.
 
-**Play it:** (Vercel URL goes here after deploy)
+**Play it:** https://smashy-road-demo.vercel.app
 
 ## Controls
 
