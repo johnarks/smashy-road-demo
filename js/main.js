@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildCity, makeCar, hitsSolid, PITCH, HALF, BOUND, solids } from './world.js';
+import { buildCity, makeCar, hitsSolid, PITCH, HALF, BOUND, BLOCKS, solids } from './world.js';
 import { input, initInput } from './input.js';
 
 // ---------------------------------------------------------------- tuning ---
