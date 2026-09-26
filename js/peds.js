@@ -4,7 +4,7 @@ import { LINES, linePos, roadWidth, HALF } from './world.js';
 // Pedestrians strolling the sidewalks. One InstancedMesh, per-instance color.
 // Touch one and the run is over.
 
-const COUNT = 70;
+const COUNT = 750;
 const SHIRTS = [0xd25a5a, 0x5a7fd2, 0x5ad27a, 0xd2c55a, 0x9a5ad2, 0x5ad2c5, 0xe8e8e8, 0x333333];
 const rand = (a, b) => a + Math.random() * (b - a);
 

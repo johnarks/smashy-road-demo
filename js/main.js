@@ -59,7 +59,7 @@ function spawnCop(x, z) {
   const mesh = makeCarDetailed({ police: true });
   scene.add(mesh);
   const dx = player.x - x, dz = player.z - z;
-  cops.push({ mesh, x, z, heading: Math.atan2(dx, dz), speed: 10 });
+  cops.push({ mesh, x, z, heading: Math.atan2(dx, dz), speed: 10, stun: 0, grace: 0, spin: 0, spinVel: 0 });
 }
 
 function copSpawnFar() {
@@ -84,6 +84,7 @@ function reset() {
   elapsed = 0; distance = 0; brakeHeld = 0; steer = 0;
   for (const c of cops) scene.remove(c.mesh);
   cops = [];
+  traffic.scatter(player.x, player.z, 60);
   copSpawnFar(); copSpawnFar();
   scoreEl.textContent = '0.0s';
 }
@@ -160,6 +161,8 @@ function updatePlayer(dt) {
   });
 }
 
+let nearestCop = Infinity;
+
 function updateCops(dt) {
   sirenT += dt;
   const phase = Math.floor(sirenT * 6) % 2 === 0;
@@ -168,10 +171,13 @@ function updateCops(dt) {
   const want = Math.min(2 + Math.floor(elapsed / 20), 7);
   if (cops.length < want) copSpawnFar();
 
+  nearestCop = Infinity;
+
   for (let ci = cops.length - 1; ci >= 0; ci--) {
     const c = cops[ci];
     const dx = player.x - c.x, dz = player.z - c.z;
     const dist = Math.hypot(dx, dz);
+    if (dist < nearestCop) nearestCop = dist;
     if (dist < COP.bustDist) { endGame('BUSTED!'); return; }
     // a cop that falls way behind re-enters elsewhere — the chase never ends
     if (dist > 175) {
@@ -180,37 +186,70 @@ function updateCops(dt) {
       copSpawnFar();
       continue;
     }
+    if (c.grace > 0) c.grace -= dt;
 
-    let desired = Math.atan2(dx, dz);
-    const px = c.x + Math.sin(c.heading) * 7, pz = c.z + Math.cos(c.heading) * 7;
-    if (hitsSolids(px, pz, 2.5)) desired = c.heading + 1.35;          // buildings/poles
-    else if (traffic.near(px, pz, 5)) desired = c.heading - 1.1;     // traffic
-    if (Math.abs(px) > BOUND - 5 || Math.abs(pz) > BOUND - 5) desired = Math.atan2(-c.x, -c.z);
+    if (c.stun > 0) {
+      // crashed into traffic: spin out, then recover
+      c.stun -= dt;
+      c.spin += c.spinVel * dt;
+      c.spinVel *= Math.max(0, 1 - 2.2 * dt);
+      c.mesh.position.set(c.x, 0, c.z);
+      c.mesh.rotation.y = c.heading + c.spin;
+    } else {
+      let desired = Math.atan2(dx, dz);
+      const px = c.x + Math.sin(c.heading) * 7, pz = c.z + Math.cos(c.heading) * 7;
+      if (hitsSolids(px, pz, 2.5)) desired = c.heading + 1.35;          // buildings/poles
+      else if (traffic.near(px, pz, 5)) desired = c.heading - 1.1;     // traffic
+      if (Math.abs(px) > BOUND - 5 || Math.abs(pz) > BOUND - 5) desired = Math.atan2(-c.x, -c.z);
 
-    c.heading = turnToward(c.heading, desired, COP.turn * dt);
-    c.speed = Math.min(c.speed + COP.accel * dt, COP.maxSpeed);
-    c.x += Math.sin(c.heading) * c.speed * dt;
-    c.z += Math.cos(c.heading) * c.speed * dt;
+      c.heading = turnToward(c.heading, desired, COP.turn * dt);
+      c.speed = Math.min(c.speed + COP.accel * dt, COP.maxSpeed);
+      c.x += Math.sin(c.heading) * c.speed * dt;
+      c.z += Math.cos(c.heading) * c.speed * dt;
 
-    // plow through traffic (knocks the car away, costs the cop some speed)
-    const hit = traffic.near(c.x, c.z, 3.0);
-    if (hit) { traffic.knock(hit, player.x, player.z); c.speed *= 0.55; }
+      // slamming into traffic wrecks the cop — bait them into it
+      const hit = traffic.near(c.x, c.z, 3.0);
+      if (hit && c.grace <= 0) {
+        traffic.shove(hit);
+        c.stun = 2.4; c.grace = 4.0; c.speed = 0; c.spin = 0;
+        c.spinVel = (Math.random() < 0.5 ? -1 : 1) * (5 + Math.random() * 3);
+      }
 
-    c.mesh.position.set(c.x, 0, c.z);
-    c.mesh.rotation.y = c.heading;
+      c.mesh.position.set(c.x, 0, c.z);
+      c.mesh.rotation.y = c.heading;
+    }
+
     const s = c.mesh.userData.siren;
     if (s) {
       s.red.emissiveIntensity = phase ? 2.5 : 0.15;
       s.blue.emissiveIntensity = phase ? 0.15 : 2.5;
     }
   }
+
+  // cop-vs-cop separation: no more piling on top of each other
+  for (let a = 0; a < cops.length; a++) {
+    for (let b = a + 1; b < cops.length; b++) {
+      const A = cops[a], B = cops[b];
+      const dx = B.x - A.x, dz = B.z - A.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 0.01 && d < 7) {
+        const push = ((7 - d) / 7) * 9 * dt;
+        const nx = dx / d, nz = dz / d;
+        A.x -= nx * push; A.z -= nz * push;
+        B.x += nx * push; B.z += nz * push;
+      }
+    }
+  }
 }
 
 const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(0, 0, 0);
-let curFov = 62;
+let curFov = 62, curDist = 12.5;
 function updateCamera(dt) {
   const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
-  camPos.set(player.x - fx * 12.5, 6.2, player.z - fz * 12.5);
+  // pull back when the cops are right on your bumper — more room to see the chase
+  const wantDist = 12.5 + (nearestCop < 18 ? (18 - nearestCop) * 0.45 : 0);
+  curDist += (Math.min(wantDist, 19) - curDist) * (1 - Math.exp(-dt * 3));
+  camPos.set(player.x - fx * curDist, 6.2 + (curDist - 12.5) * 0.35, player.z - fz * curDist);
   camLook.set(player.x + fx * 8, 1.3, player.z + fz * 8);
   const k = 1 - Math.exp(-dt * 5.5);
   camera.position.lerp(camPos, k);
@@ -236,7 +275,7 @@ function tick() {
   worldTime += dt;
 
   city.setPhase(lightPhase(worldTime));
-  traffic.update(dt, worldTime, player.x, player.z);
+  traffic.update(dt, worldTime, player.x, player.z, player.heading, Math.abs(player.speed));
   peds.update(dt, worldTime);
 
   if (state === 'playing') {
