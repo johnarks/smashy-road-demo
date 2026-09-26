@@ -1,11 +1,19 @@
 import * as THREE from 'three';
-import { buildCity, makeCar, hitsSolid, PITCH, HALF, BOUND, BLOCKS, solids } from './world.js';
+import {
+  buildCity, makeCarDetailed, makeTrafficCarGeometry, makePedGeometry,
+  hitsSolids, lightPhase, LINES, linePos, lanesFor, headingFor, lanePos, HALF, BOUND,
+} from './world.js';
+import { Traffic } from './traffic.js';
+import { Peds } from './peds.js';
 import { input, initInput } from './input.js';
 
 // ---------------------------------------------------------------- tuning ---
-const PLAYER = { accel: 16, maxSpeed: 27, brake: 34, revAccel: 10, revMax: -9, turn: 2.5, radius: 1.7 };
-const COP    = { accel: 14, maxSpeed: 24.5, turn: 2.1, radius: 1.7, bustDist: 3.4 };
-const REVERSE_DELAY = 0.7;          // hold brake this long at a stop -> backs up
+const PLAYER = {
+  accel: 17, maxSpeed: 28, brake: 36, revAccel: 11, revMax: -9,
+  radius: 1.7, steerRate: 7.5, maxTurn: 3.6,
+};
+const COP = { accel: 17, maxSpeed: 26.5, turn: 2.3, bustDist: 3.6 };
+const REVERSE_DELAY = 0.7;
 
 // ------------------------------------------------------------------- setup ---
 const canvas = document.getElementById('game');
@@ -17,60 +25,66 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fc5e8);
-scene.fog = new THREE.Fog(0x9fc5e8, 120, 420);
+scene.fog = new THREE.Fog(0x9fc5e8, 140, 520);
 
-const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 900);
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 1200);
 
-scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x6a7a52, 0.9));
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x6a7a52, 0.95));
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
-sun.shadow.camera.left = -60; sun.shadow.camera.right = 60;
-sun.shadow.camera.top = 60; sun.shadow.camera.bottom = -60;
-sun.shadow.camera.far = 300;
+sun.shadow.camera.left = -70; sun.shadow.camera.right = 70;
+sun.shadow.camera.top = 70; sun.shadow.camera.bottom = -70;
+sun.shadow.camera.far = 320;
 scene.add(sun, sun.target);
 
-buildCity(scene);
+const city = buildCity(scene);
+const traffic = new Traffic(scene, makeTrafficCarGeometry());
+const peds = new Peds(scene, makePedGeometry());
 
 // ------------------------------------------------------------------- state ---
 let state = 'menu';           // menu | playing | over
-let camMode = 'chase';        // chase | iso
-let elapsed = 0, distance = 0, brakeHeld = 0;
+let elapsed = 0, worldTime = 0, distance = 0, brakeHeld = 0;
+let steer = 0;                // analog steering: -1 (right) .. +1 (left)
 let cops = [];
 let sirenT = 0;
 
-const player = {
-  mesh: makeCar({ color: 0xd23b3b }),
-  x: 0, z: 0, heading: 0, speed: 0,
-};
+const player = { mesh: makeCarDetailed({ color: 0xd23b3b }), x: 0, z: 0, heading: 0, speed: 0 };
 scene.add(player.mesh);
 
 const el = (id) => document.getElementById(id);
 const scoreEl = el('score'), menuEl = el('menu'), overEl = el('over');
-const btnCam = el('btnCam');
 
-function roadCoord() { return -HALF + ((Math.random() * (BLOCKS + 1)) | 0) * PITCH; }
-
-function spawnCop() {
-  let x = roadCoord(), z = roadCoord(), tries = 0;
-  while (tries++ < 20) {
-    const dx = x - player.x, dz = z - player.z;
-    if (dx * dx + dz * dz > 70 * 70 && !hitsSolid(x, z, 3)) break;
-    x = roadCoord(); z = roadCoord();
-  }
-  const mesh = makeCar({ police: true });
+function spawnCop(x, z) {
+  const mesh = makeCarDetailed({ police: true });
   scene.add(mesh);
   const dx = player.x - x, dz = player.z - z;
-  cops.push({ mesh, x, z, heading: Math.atan2(dx, dz), speed: 8 });
+  cops.push({ mesh, x, z, heading: Math.atan2(dx, dz), speed: 10 });
+}
+
+function copSpawnFar() {
+  // drop a cop 100-140m from the player to keep the pressure on forever
+  for (let tries = 0; tries < 12; tries++) {
+    const a = Math.random() * Math.PI * 2, d = 100 + Math.random() * 40;
+    const x = player.x + Math.cos(a) * d, z = player.z + Math.sin(a) * d;
+    if (Math.abs(x) > BOUND - 6 || Math.abs(z) > BOUND - 6) continue;
+    if (hitsSolids(x, z, 4)) continue;
+    spawnCop(x, z);
+    return;
+  }
+  spawnCop(player.x + 110, player.z);  // fallback: almost never used
 }
 
 function reset() {
-  // park the player on a vertical road (x=-23 is a road center), facing +z
-  player.x = -HALF + 4 * PITCH; player.z = 0; player.heading = 0; player.speed = 0;
-  elapsed = 0; distance = 0; brakeHeld = 0;
+  // start on the central avenue (line 5 -> x=0), in a +z lane
+  const lanes = lanesFor('x', 5);
+  const lane = lanes.find(l => l.dir > 0) || lanes[0];
+  const p = lanePos('x', 5, lane, -60);
+  player.x = p.x; player.z = p.z; player.heading = 0; player.speed = 0;
+  elapsed = 0; distance = 0; brakeHeld = 0; steer = 0;
   for (const c of cops) scene.remove(c.mesh);
   cops = [];
-  spawnCop(); spawnCop();
+  copSpawnFar(); copSpawnFar();
   scoreEl.textContent = '0.0s';
 }
 
@@ -82,9 +96,10 @@ function startGame() {
 }
 
 function endGame(title) {
+  if (state !== 'playing') return;
   state = 'over';
   el('overTitle').textContent = title;
-  el('overStats').textContent = `${elapsed.toFixed(1)}s · ${Math.round(distance)}m · ${cops.length} cops dodged`;
+  el('overStats').textContent = `${elapsed.toFixed(1)}s · ${Math.round(distance)}m`;
   overEl.classList.remove('hidden');
 }
 
@@ -102,40 +117,46 @@ function updatePlayer(dt) {
 
   if (braking) {
     brakeHeld += dt;
-    player.speed -= PLAYER.brake * dt;
-    if (player.speed < 0) player.speed = 0;
-    // fully stopped + still holding -> start backing up
+    player.speed = Math.max(0, player.speed - PLAYER.brake * dt);
     if (player.speed <= 0.01 && brakeHeld > REVERSE_DELAY) {
       player.speed = Math.max(player.speed - PLAYER.revAccel * dt, PLAYER.revMax);
     }
   } else {
     brakeHeld = 0;
-    // the car always drives: ease back up to cruising speed
     player.speed = Math.min(player.speed + PLAYER.accel * dt, PLAYER.maxSpeed);
   }
 
+  // --- analog steering: binary input eases into a smooth steer value ---
+  const target = (input.left ? 1 : 0) - (input.right ? 1 : 0);  // +1 = left
+  const d = target - steer;
+  steer += Math.max(-PLAYER.steerRate * dt, Math.min(PLAYER.steerRate * dt, d));
+
   const spd = Math.abs(player.speed);
-  const grip = Math.min(1, spd / 8);              // can't turn on the spot
-  const dir = player.speed >= 0 ? 1 : -1;        // reverse flips steering
-  if (input.left && !input.right) player.heading += PLAYER.turn * grip * dir * dt;
-  if (input.right && !input.left) player.heading -= PLAYER.turn * grip * dir * dt;
+  const grip = Math.min(1, spd / 9);                              // no turning when parked
+  const taper = 1 - 0.32 * Math.min(1, Math.max(0, (spd - 19) / 9)); // stability at speed
+  const dir = player.speed >= 0 ? 1 : -1;
+  player.heading += steer * PLAYER.maxTurn * grip * taper * dir * dt;
 
   const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
   player.x += fx * player.speed * dt;
   player.z += fz * player.speed * dt;
   distance += spd * dt;
 
-  // crashes
+  // --- crashes: walls, buildings, poles, traffic, pedestrians ---
   if (Math.abs(player.x) > BOUND || Math.abs(player.z) > BOUND) return endGame('WRECKED!');
-  if (hitsSolid(player.x, player.z, PLAYER.radius)) return endGame('WRECKED!');
+  if (hitsSolids(player.x, player.z, PLAYER.radius)) return endGame('WRECKED!');
+  if (traffic.playerHit(player.x, player.z)) return endGame('WRECKED!');
+  if (peds.playerHit(player.x, player.z)) return endGame('WRECKED!');
 
   player.mesh.position.set(player.x, 0, player.z);
   player.mesh.rotation.y = player.heading;
-  // wheel spin + front-wheel steer visual
+  // body roll into the turn + wheel visuals
+  const sf = Math.min(1, spd / PLAYER.maxSpeed);
+  player.mesh.userData.body.rotation.z = -steer * 0.07 * sf;
   const spin = (player.speed / 0.42) * dt;
   player.mesh.userData.wheels.forEach((w, i) => {
     w.rotation.x += spin;
-    if (i < 2) w.rotation.y = (input.left && !input.right ? 0.4 : 0) + (input.right && !input.left ? -0.4 : 0);
+    if (i < 2) w.rotation.y = steer * 0.42;
   });
 }
 
@@ -143,28 +164,37 @@ function updateCops(dt) {
   sirenT += dt;
   const phase = Math.floor(sirenT * 6) % 2 === 0;
 
-  // more heat over time: +1 cop every 25s, cap 6
-  const want = Math.min(2 + Math.floor(elapsed / 25), 6);
-  if (cops.length < want) spawnCop();
+  // heat: you never truly outrun them — fresh cops keep joining the chase
+  const want = Math.min(2 + Math.floor(elapsed / 20), 7);
+  if (cops.length < want) copSpawnFar();
 
-  for (const c of cops) {
+  for (let ci = cops.length - 1; ci >= 0; ci--) {
+    const c = cops[ci];
     const dx = player.x - c.x, dz = player.z - c.z;
     const dist = Math.hypot(dx, dz);
     if (dist < COP.bustDist) { endGame('BUSTED!'); return; }
+    // a cop that falls way behind re-enters elsewhere — the chase never ends
+    if (dist > 175) {
+      scene.remove(c.mesh);
+      cops.splice(ci, 1);
+      copSpawnFar();
+      continue;
+    }
 
     let desired = Math.atan2(dx, dz);
-    // building avoidance: probe ahead, veer if blocked
     const px = c.x + Math.sin(c.heading) * 7, pz = c.z + Math.cos(c.heading) * 7;
-    if (hitsSolid(px, pz, 2.5)) desired = c.heading + 1.3;
-    // stay in bounds
-    if (Math.abs(px) > BOUND - 4 || Math.abs(pz) > BOUND - 4) {
-      desired = Math.atan2(-c.x, -c.z);
-    }
+    if (hitsSolids(px, pz, 2.5)) desired = c.heading + 1.35;          // buildings/poles
+    else if (traffic.near(px, pz, 5)) desired = c.heading - 1.1;     // traffic
+    if (Math.abs(px) > BOUND - 5 || Math.abs(pz) > BOUND - 5) desired = Math.atan2(-c.x, -c.z);
 
     c.heading = turnToward(c.heading, desired, COP.turn * dt);
     c.speed = Math.min(c.speed + COP.accel * dt, COP.maxSpeed);
     c.x += Math.sin(c.heading) * c.speed * dt;
     c.z += Math.cos(c.heading) * c.speed * dt;
+
+    // plow through traffic (knocks the car away, costs the cop some speed)
+    const hit = traffic.near(c.x, c.z, 3.0);
+    if (hit) { traffic.knock(hit, player.x, player.z); c.speed *= 0.55; }
 
     c.mesh.position.set(c.x, 0, c.z);
     c.mesh.rotation.y = c.heading;
@@ -176,24 +206,24 @@ function updateCops(dt) {
   }
 }
 
-const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3(0, 0, 0);
+let curFov = 62;
 function updateCamera(dt) {
   const fx = Math.sin(player.heading), fz = Math.cos(player.heading);
-  if (camMode === 'chase') {
-    camPos.set(player.x - fx * 11, 5.6, player.z - fz * 11);
-    camLook.set(player.x + fx * 7, 1.2, player.z + fz * 7);
-  } else {
-    camPos.set(player.x + 20, 24, player.z + 20);
-    camLook.set(player.x, 0, player.z);
-  }
-  const k = 1 - Math.exp(-dt * 6);
+  camPos.set(player.x - fx * 12.5, 6.2, player.z - fz * 12.5);
+  camLook.set(player.x + fx * 8, 1.3, player.z + fz * 8);
+  const k = 1 - Math.exp(-dt * 5.5);
   camera.position.lerp(camPos, k);
-  // lookAt needs a smoothed target too
-  const lk = 1 - Math.exp(-dt * 8);
-  _lookCur.lerp(camLook, lk);
+  _lookCur.lerp(camLook, 1 - Math.exp(-dt * 8));
   camera.lookAt(_lookCur);
-  // shadow frustum follows the player
-  sun.position.set(player.x + 40, 70, player.z + 25);
+  // speed sensation: widen the FOV as you go faster
+  const targetFov = 62 + 10 * Math.min(1, Math.abs(player.speed) / PLAYER.maxSpeed);
+  curFov += (targetFov - curFov) * (1 - Math.exp(-dt * 4));
+  if (Math.abs(curFov - camera.fov) > 0.05) {
+    camera.fov = curFov;
+    camera.updateProjectionMatrix();
+  }
+  sun.position.set(player.x + 45, 75, player.z + 28);
   sun.target.position.set(player.x, 0, player.z);
 }
 const _lookCur = new THREE.Vector3(0, 0, 0);
@@ -203,16 +233,20 @@ const clock = new THREE.Clock();
 function tick() {
   requestAnimationFrame(tick);
   const dt = Math.min(clock.getDelta(), 0.05);
+  worldTime += dt;
+
+  city.setPhase(lightPhase(worldTime));
+  traffic.update(dt, worldTime, player.x, player.z);
+  peds.update(dt, worldTime);
 
   if (state === 'playing') {
     elapsed += dt;
     updatePlayer(dt);
-    if (state === 'playing') {   // updatePlayer may have ended the game
+    if (state === 'playing') {
       updateCops(dt);
       scoreEl.textContent = `${elapsed.toFixed(1)}s`;
     }
   }
-  // camera keeps following even on the game-over screen (frozen scene)
   if (state !== 'menu') updateCamera(dt);
   renderer.render(scene, camera);
 }
@@ -233,13 +267,8 @@ el('btnExit').addEventListener('click', () => {
   menuEl.classList.remove('hidden');
 });
 el('btnRestart').addEventListener('click', () => { if (state !== 'menu') startGame(); });
-btnCam.addEventListener('click', () => {
-  camMode = camMode === 'chase' ? 'iso' : 'chase';
-  btnCam.textContent = camMode === 'chase' ? 'CHASE' : 'ISO';
-});
 
-// idle camera drift behind the menu
-camera.position.set(0, 60, 120);
+camera.position.set(0, 70, 140);
 camera.lookAt(0, 0, 0);
-reset();          // park a scene behind the menu
+reset();
 tick();
