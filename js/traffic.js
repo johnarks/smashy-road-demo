@@ -61,6 +61,8 @@ export class Traffic {
       lat: 0, latVel: 0, evadeTarget: 0, evadeHold: 0,  // lateral offset for evasion/shove
       nerve: Math.random(),             // <0.3 freezes, mid brakes, high swerves
       shoveT: 0, shoveLat: 0,           // set when a cop slams into it
+      blend: null,                     // active intersection turn (bezier)
+      planNode: -1, planTurn: false, planLeft: false,  // turn decided one intersection early
       _x: 0, _z: 0,
     };
   }
@@ -153,6 +155,18 @@ export class Traffic {
         }
       }
 
+      // --- turn planning: decide one intersection early so the car eases off
+      // before the turn like a real driver (also makes the turn readable)
+      if (!car.blend && j >= 0 && d < 16 && car.planNode !== j) {
+        car.planNode = j;
+        car.planTurn = Math.random() < 0.45;
+        car.planLeft = Math.random() < 0.5;
+      }
+      if (!car.blend && car.planTurn && car.planNode === j && j >= 0 && d < 16) {
+        want = Math.min(want, 7.5);
+      }
+      if (car.blend) want = Math.min(want, 7.5);   // steady through the turn
+
       // --- the player as a threat ---
       const relX = px - x, relZ = pz - z;
       const ahead = relX * fx + relZ * fz;      // + = in front of the car
@@ -191,7 +205,10 @@ export class Traffic {
         car.lat += car.shoveLat * dt;
         car.shoveLat *= Math.max(0, 1 - 3 * dt);
       } else {
-        car.lat = moveToward(car.lat, car.evadeTarget, 2.4 * dt);
+        // lateral rate scales with forward speed: a stopped car creeps
+        // sideways instead of darting (no ice-skating); a fast car swerves fully
+        const latRate = 2.4 * Math.max(0.3, Math.min(1, car.speed / 5));
+        car.lat = moveToward(car.lat, car.evadeTarget, latRate * dt);
         car.lat = Math.max(-5.5, Math.min(5.5, car.lat));
       }
       car.latVel = dt > 0 ? (car.lat - prevLat) / dt : 0;
@@ -200,12 +217,26 @@ export class Traffic {
       if (car.speed < 0) car.speed = 0;
       car.t += car.dir * car.speed * dt;
 
-      // intersection: maybe turn
-      if (j >= 0 && Math.abs(car.t - linePos(j)) < 2.5 && car.node !== j) {
+      // intersection: execute the planned turn as a short bezier blend.
+      // The nose follows the path tangent exactly, so the heading can never
+      // disagree with the direction of travel mid-turn (no drift/slide look).
+      // The blend advances by real distance traveled, so the car moves
+      // through the turn at its simulated speed — no pops, no speed warps.
+      // A car with a planned turn starts blending up to 8m before the
+      // center (at the box entrance), so the curve's entry arm reaches the
+      // target lane while it's still ahead — starting the turn inside the
+      // box would force a hairpin cusp. Queued/stopped cars use the normal
+      // window and may miss the turn instead of hairpinning.
+      const toCenter = (linePos(j) - car.t) * car.dir;
+      const earlyTurn = car.planNode === j && car.planTurn && car.speed > 1;
+      const trigDist = earlyTurn ? 8 : 2.5;
+      if (j >= 0 && toCenter < trigDist && toCenter > -2.5 && car.node !== j && !car.blend) {
         const oldLine = car.line;
         car.node = j;
-        if (Math.random() > 0.55) {
-          const left = Math.random() > 0.5;
+        const doTurn = car.planNode === j && car.planTurn;
+        car.planNode = -1;
+        if (doTurn) {
+          const left = car.planLeft;
           let hNew = car.hTarget + (left ? -Math.PI / 2 : Math.PI / 2);
           while (hNew > Math.PI) hNew -= Math.PI * 2;
           while (hNew < -Math.PI) hNew += Math.PI * 2;
@@ -216,27 +247,62 @@ export class Traffic {
           // (Keep straight instead.)
           const oneWayS = roadType(j) === 'oneway' ? (j % 2 === 0 ? 1 : -1) : 0;
           if (oneWayS === 0 || reqDir === oneWayS) {
-          const newLanes = lanesFor(newAxis, j);
-          let bestL = 0, bestO = Infinity;
-          newLanes.forEach((L, idx) => {
-            if (L.dir === reqDir && Math.abs(L.offset) < bestO) { bestO = Math.abs(L.offset); bestL = idx; }
-          });
-          // carry the world position (including any swerve offset) through the
-          // turn: project it into the new lane frame so the car never pops sideways
-          const p = this.rawPos(car.axis, car.line, lane, car.lat, car.t);
-          const nl = newLanes[bestL];
-          car.axis = newAxis; car.line = j; car.lanes = newLanes; car.laneIdx = bestL;
-          car.dir = reqDir;
-          if (newAxis === 'x') { car.t = p.z; car.lat = p.x - (linePos(j) + nl.offset); }
-          else { car.t = p.x; car.lat = p.z - (linePos(j) + nl.offset); }
-          car.lat = Math.max(-5.5, Math.min(5.5, car.lat));
-          car.hTarget = hNew;
-          car.evadeTarget = 0; car.evadeHold = 0;
-          // the intersection just turned at, expressed as a node on the NEW
-          // axis, is always the old road (oldLine) — guard it so the car
-          // can't re-trigger and whip around twice in the same box
-          car.node = oldLine;
-          } // end one-way guard
+            const newLanes = lanesFor(newAxis, j);
+            let bestL = 0, bestO = Infinity;
+            newLanes.forEach((L, idx) => {
+              if (L.dir === reqDir && Math.abs(L.offset) < bestO) { bestO = Math.abs(L.offset); bestL = idx; }
+            });
+            const nl = newLanes[bestL];
+            // Cubic bezier turn: C1 leads out along the old heading, C2 comes
+            // in along the new heading, P3 sits exactly on the target lane.
+            // Tangents are exact at both ends, so the nose can never disagree
+            // with the direction of travel.
+            const p = this.rawPos(car.axis, car.line, lane, car.lat, car.t);
+            const P0 = { x: p.x, z: p.z };
+            const d0x = car.axis === 'x' ? 0 : car.dir;
+            const d0z = car.axis === 'x' ? car.dir : 0;
+            const d1x = newAxis === 'x' ? 0 : reqDir;
+            const d1z = newAxis === 'x' ? reqDir : 0;
+            const laneC = linePos(j) + nl.offset;
+            const fwdRaw = newAxis === 'x' ? (laneC - P0.x) * car.dir : (laneC - P0.z) * car.dir;
+            // Too late for a smooth turn: the car is already past the target
+            // lane's centerline, so any forward-only curve would be a hairpin
+            // (the nose whips ~120° while the car crawls through the cusp).
+            // Just miss the turn and go straight — it replans downstream.
+            if (fwdRaw < 1.0) { /* too late — miss the turn, go straight */ }
+            else {
+            const a = Math.max(0.3, Math.min(6, fwdRaw));
+            const S = Math.max(2, Math.min(4.5, car.speed * 0.32));
+            const P3 = newAxis === 'x'
+              ? { x: laneC, z: P0.z + reqDir * S }
+              : { x: P0.x + reqDir * S, z: laneC };
+            const C1 = { x: P0.x + d0x * a, z: P0.z + d0z * a };
+            const C2 = { x: P3.x - d1x * S, z: P3.z - d1z * S };
+            // arc-length table so the car advances at exactly its simulated
+            // speed (a raw bezier u would surge/sag through the turn)
+            const NSEG = 16, arc = [0];
+            let qx = P0.x, qz = P0.z;
+            const cbez = (uq) => {
+              const iu = 1 - uq;
+              return {
+                x: iu*iu*iu*P0.x + 3*iu*iu*uq*C1.x + 3*iu*uq*uq*C2.x + uq*uq*uq*P3.x,
+                z: iu*iu*iu*P0.z + 3*iu*iu*uq*C1.z + 3*iu*uq*uq*C2.z + uq*uq*uq*P3.z,
+              };
+            };
+            for (let sqi = 1; sqi <= NSEG; sqi++) {
+              const b = cbez(sqi / NSEG);
+              arc.push(arc[sqi - 1] + Math.hypot(b.x - qx, b.z - qz)); qx = b.x; qz = b.z;
+            }
+            const pathLen = Math.max(arc[NSEG], 0.5);
+            car.blend = {
+              P0, C1, C2, P3, arc, NSEG, pathLen, s: 0,
+              newAxis, j, reqDir, bestL, hNew, oldLine, d1x, d1z,
+            };
+            car.hTarget = hNew;
+            car.evadeTarget = 0; car.evadeHold = 0;
+            this.turnCommits = (this.turnCommits || 0) + 1;
+            }
+          }
         }
       }
       car.hCur = turnToward(car.hCur, car.hTarget, 4.5 * dt);
@@ -247,8 +313,20 @@ export class Traffic {
       // toroidal city: cars loop around the edge instead of vanishing.
       // WRAP is a multiple of the road pitch, so lanes stay aligned.
       if (Math.abs(car.t) > HALF + 8) {
-        car.t += car.t > 0 ? -WRAP : WRAP;
+        const wshift = car.t > 0 ? -WRAP : WRAP;
+        car.t += wshift;
         car.node = -1;  // re-arm intersection logic at the new location
+        car.planNode = -1;
+        if (car.blend) {
+          // a turn blend straddling the seam: shift its path with the wrap
+          // (t runs along z for axis 'x', along x for axis 'z')
+          const wb = car.blend, wsh = wshift;
+          if (car.axis === 'x') {
+            wb.P0.z += wsh; wb.C1.z += wsh; wb.C2.z += wsh; wb.P3.z += wsh;
+          } else {
+            wb.P0.x += wsh; wb.C1.x += wsh; wb.C2.x += wsh; wb.P3.x += wsh;
+          }
+        }
         const pw = this.rawPos(car.axis, car.line, car.lanes[car.laneIdx], car.lat, car.t);
         car._x = pw.x; car._z = pw.z;
       } else if (Math.hypot(pos.x - px, pos.z - pz) > 400) {
@@ -260,11 +338,47 @@ export class Traffic {
       }
 
       const c3 = this.cars[i];
-      this.dummy.position.set(c3._x, 0, c3._z);
       // yaw into the swerve: the nose leads the lateral motion like a real
       // lane change, instead of the body drafting sideways while pointing straight
       const wobble = c3.shoveT > 0 ? Math.sin(c3.shoveT * 20) * 0.35
         : Math.max(-0.35, Math.min(0.35, (c3.latVel || 0) * 0.12));
+      const bl = c3.blend;
+      if (bl) {
+        // mid-turn: advance by real distance traveled, mapped through the
+        // arc-length table for uniform speed; the nose follows the path
+        // tangent, so heading always matches the direction of motion
+        bl.s += c3.speed * dt;
+        const sC = Math.min(bl.s, bl.pathLen);
+        let k = 1;
+        while (k < bl.NSEG && bl.arc[k] < sC) k++;
+        const s0 = bl.arc[k - 1], s1 = bl.arc[k];
+        const u = (k - 1 + (s1 > s0 ? (sC - s0) / (s1 - s0) : 0)) / bl.NSEG;
+        const iu = 1 - u;
+        const bx = iu*iu*iu*bl.P0.x + 3*iu*iu*u*bl.C1.x + 3*iu*u*u*bl.C2.x + u*u*u*bl.P3.x;
+        const bz = iu*iu*iu*bl.P0.z + 3*iu*iu*u*bl.C1.z + 3*iu*u*u*bl.C2.z + u*u*u*bl.P3.z;
+        let tx = 3*iu*iu*(bl.C1.x - bl.P0.x) + 6*iu*u*(bl.C2.x - bl.C1.x) + 3*u*u*(bl.P3.x - bl.C2.x);
+        let tz = 3*iu*iu*(bl.C1.z - bl.P0.z) + 6*iu*u*(bl.C2.z - bl.C1.z) + 3*u*u*(bl.P3.z - bl.C2.z);
+        if (tx * tx + tz * tz < 1e-6) { tx = bl.d1x; tz = bl.d1z; }
+        c3._x = bx; c3._z = bz;
+        c3.hCur = Math.atan2(tx, tz);
+        if (bl.s >= bl.pathLen) {
+          // commit: land exactly on the target lane, nose exactly on heading.
+          // The position is continuous by construction (cubic ends on P3).
+          c3.axis = bl.newAxis; c3.line = bl.j;
+          c3.lanes = lanesFor(bl.newAxis, bl.j);
+          c3.laneIdx = bl.bestL; c3.dir = bl.reqDir;
+          c3.t = bl.newAxis === 'x' ? bl.P3.z : bl.P3.x;
+          c3.lat = 0; c3.latVel = 0;
+          c3.hCur = bl.hNew; c3.hTarget = bl.hNew;
+          // the intersection just turned at, expressed as a node on the NEW
+          // axis, is always the old road (oldLine) — guard it so the car
+          // can't re-trigger and whip around twice in the same box
+          c3.node = bl.oldLine; c3.planNode = -1; c3.blend = null;
+          const pw = this.rawPos(c3.axis, c3.line, c3.lanes[c3.laneIdx], 0, c3.t);
+          c3._x = pw.x; c3._z = pw.z;
+        }
+      }
+      this.dummy.position.set(c3._x, 0, c3._z);
       this.dummy.rotation.set(0, c3.hCur + wobble, 0);
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);

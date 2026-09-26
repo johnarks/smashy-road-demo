@@ -9,7 +9,7 @@ import { createSim, resetSim, stepGame, dampAngle, PLAYER } from './sim.js';
 
 // Bump this on every release — it's shown in the HUD corner and the menu so
 // players can tell whether they're on the latest deployed build.
-const GAME_VERSION = '1.1.0';
+const GAME_VERSION = '1.2.0';
 
 // ------------------------------------------------------------------- setup ---
 const canvas = document.getElementById('game');
