@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Smashy Drive — tiny chase demo</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚗</text></svg>">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0e0f13; touch-action:none;
+               font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; user-select:none; -webkit-user-select:none; }
+  #game { position:fixed; inset:0; display:block; }
+
+  /* ---------- HUD ---------- */
+  #hud { position:fixed; top:0; left:0; right:0; display:flex; justify-content:space-between;
+         align-items:flex-start; padding:calc(10px + env(safe-area-inset-top)) 14px 0; pointer-events:none; z-index:5; }
+  #score { color:#fff; font-weight:700; font-size:18px; text-shadow:0 2px 6px rgba(0,0,0,.6);
+           background:rgba(0,0,0,.35); padding:8px 14px; border-radius:999px; backdrop-filter:blur(4px); }
+  #topbtns { display:flex; gap:10px; pointer-events:auto; }
+  .iconbtn { width:48px; height:48px; border-radius:14px; border:1px solid rgba(255,255,255,.25);
+             background:rgba(0,0,0,.45); color:#fff; font-size:13px; font-weight:800; cursor:pointer;
+             display:flex; align-items:center; justify-content:center; backdrop-filter:blur(4px); }
+  .iconbtn:active { transform:scale(.92); background:rgba(0,0,0,.65); }
+  .iconbtn svg { width:24px; height:24px; fill:#fff; }
+
+  /* ---------- Overlays ---------- */
+  .overlay { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; align-items:center;
+             justify-content:center; gap:18px; background:rgba(8,10,16,.72); backdrop-filter:blur(6px);
+             color:#fff; text-align:center; padding:24px; }
+  .overlay.hidden { display:none; }
+  .title { font-size:52px; font-weight:900; letter-spacing:2px;
+            background:linear-gradient(180deg,#ffd54a,#ff7a1a); -webkit-background-clip:text; background-clip:text; color:transparent;
+            filter:drop-shadow(0 4px 12px rgba(255,122,26,.35)); }
+  .subtitle { font-size:15px; opacity:.85; line-height:1.7; max-width:340px; }
+  .bigbtn { font-size:20px; font-weight:800; letter-spacing:1px; color:#141414; background:#ffd54a;
+            border:none; border-radius:999px; padding:16px 54px; cursor:pointer;
+            box-shadow:0 6px 24px rgba(255,213,74,.4); }
+  .bigbtn:active { transform:scale(.95); }
+  .ghostbtn { font-size:15px; font-weight:700; color:#fff; background:transparent;
+              border:2px solid rgba(255,255,255,.4); border-radius:999px; padding:12px 40px; cursor:pointer; }
+  .ghostbtn:active { transform:scale(.95); }
+  #overStats { font-size:20px; font-weight:700; opacity:.9; }
+  .hint { font-size:13px; opacity:.6; line-height:1.8; }
+  .hint b { color:#ffd54a; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div id="score">0.0s</div>
+  <div id="topbtns">
+    <button class="iconbtn" id="btnCam" title="Change view">CHASE</button>
+    <button class="iconbtn" id="btnRestart" title="Restart">
+      <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6H4c0 4.4 3.6 8 8 8s8-3.6 8-8-3.6-8-8-8z"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="overlay" id="menu">
+  <div class="title">SMASHY<br>DRIVE</div>
+  <div class="subtitle">Outrun the cops. Don't hit anything.<br>Your car never stops moving.</div>
+  <button class="bigbtn" id="btnStart">TAP TO START</button>
+  <div class="hint"><b>◀ left half</b> turn left &nbsp;·&nbsp; <b>right half ▶</b> turn right<br><b>hold both</b> brake · keep holding at a stop to reverse</div>
+</div>
+
+<div class="overlay hidden" id="over">
+  <div class="title" id="overTitle">WRECKED!</div>
+  <div id="overStats">0.0s · 0m</div>
+  <button class="bigbtn" id="btnAgain">DRIVE AGAIN</button>
+  <button class="ghostbtn" id="btnExit">EXIT</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
