@@ -222,7 +222,6 @@ export function buildCity(scene) {
   const headMesh = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0x14161a }), nX * 2);
   const lampGeo = new THREE.SphereGeometry(0.15, 8, 8);
   const lampMesh = new THREE.InstancedMesh(lampGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), nX * 6);
-  lampMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
   poleMesh.frustumCulled = headMesh.frustumCulled = lampMesh.frustumCulled = false;
 
   const lampBase = [];   // {x,y,z, axis:'x'|'z', slot:0|1|2} slot: 0 red,1 yellow,2 green
@@ -268,6 +267,7 @@ export function buildCity(scene) {
     lampMesh.instanceColor.needsUpdate = true;
   }
   setPhase(0);
+  lampMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);  // instanceColor exists now (setPhase called setColorAt)
 
   return { setPhase };
 }
