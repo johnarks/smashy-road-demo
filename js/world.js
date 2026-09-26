@@ -12,6 +12,10 @@ export const LINES = 11;                 // 11 road lines per axis -> 10x10 bloc
 export const PITCH = 54;
 export const HALF = ((LINES - 1) * PITCH) / 2;   // 270
 export const BOUND = HALF + 19;                  // 289, fence line
+export const WRAP = HALF * 2;                    // 540 — toroidal city: roads loop edge to edge
+// wrap a coordinate into [-HALF, HALF). WRAP is a multiple of PITCH so the
+// road grid lines up perfectly across the seam.
+export const wrapCoord = (v) => ((v + HALF) % WRAP + WRAP) % WRAP - HALF;
 
 export const linePos = (i) => -HALF + i * PITCH;
 export function roadType(i) { const m = i % 5; return m === 0 ? 'avenue' : m === 2 ? 'oneway' : 'street'; }
@@ -59,7 +63,59 @@ export const axisGo = (phase, axis) => (axis === 'x' ? phase === 0 : phase === 2
 export const solids = [];   // {minX,maxX,minZ,maxZ}
 export const poles = [];    // {x,z,r}
 
-function rand(a, b) { return a + Math.random() * (b - a); }
+// Pure city layout: building/tree/pole placement with NO rendering and NO DOM.
+// The game and the headless test harness share this so both simulate the same city.
+// Pass a seeded rng for reproducible layouts; defaults to Math.random.
+export function generateCityLayout(rng = Math.random) {
+  const rand = (a, b) => a + rng() * (b - a);
+  const pick = (arr) => arr[(rng() * arr.length) | 0];
+  const layout = { solids: [], poles: [], buildings: [], trees: [] };
+
+  for (let i = 0; i < LINES - 1; i++) {
+    for (let j = 0; j < LINES - 1; j++) {
+      const x0 = linePos(i) + roadWidth(i) / 2 + 4.6;
+      const x1 = linePos(i + 1) - roadWidth(i + 1) / 2 - 4.6;
+      const z0 = linePos(j) + roadWidth(j) / 2 + 4.6;
+      const z1 = linePos(j + 1) - roadWidth(j + 1) / 2 - 4.6;
+      for (let li = 0; li < 2; li++) {
+        for (let lj = 0; lj < 2; lj++) {
+          const lx = x0 + (li + 0.5) * ((x1 - x0) / 2);
+          const lz = z0 + (lj + 0.5) * ((z1 - z0) / 2);
+          const lotW = (x1 - x0) / 2, lotD = (z1 - z0) / 2;
+          if (lotW < 10 || lotD < 10) continue;
+          if (rng() < 0.62) {
+            const w = rand(9, lotW - 3), d = rand(9, lotD - 3), h = rand(9, 34);
+            const bx = lx + rand(-1, 1), bz = lz + rand(-1, 1);
+            layout.buildings.push({ x: bx, z: bz, w, d, h, color: pick(BUILDING_COLORS) });
+            layout.solids.push({ minX: bx - w / 2, maxX: bx + w / 2, minZ: bz - d / 2, maxZ: bz + d / 2 });
+          } else if (rng() < 0.5) {
+            layout.trees.push({ x: lx + rand(-4, 4), z: lz + rand(-4, 4) });
+          }
+        }
+      }
+    }
+  }
+  for (let i = 0; i < LINES; i++) {
+    for (let j = 0; j < LINES; j++) {
+      layout.poles.push({
+        x: linePos(i) + roadWidth(i) / 2 + 1.4,
+        z: linePos(j) + roadWidth(j) / 2 + 1.4,
+        r: 0.55,
+      });
+    }
+  }
+  return layout;
+}
+
+// Install a layout's collision data into the module-level solids/poles
+// that hitsSolids() reads. buildCity() calls this; the harness calls it directly.
+export function installLayout(layout) {
+  solids.length = 0;
+  poles.length = 0;
+  for (const s of layout.solids) solids.push(s);
+  for (const p of layout.poles) poles.push(p);
+}
+
 function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
 
 // --- building windows -------------------------------------------------------
@@ -82,9 +138,9 @@ function windowTexture(base, rows) {
 const BUILDING_COLORS = ['#b8b2a6', '#9aa7b5', '#c4a484', '#8f9aa8', '#b59a8f', '#a8b09a'];
 const roofMat = new THREE.MeshLambertMaterial({ color: 0x5a5f66 });
 
-function makeBuilding(w, h, d) {
+function makeBuilding(w, h, d, color) {
   const rows = h < 16 ? 2 : h < 26 ? 3 : 4;
-  const wall = new THREE.MeshLambertMaterial({ map: windowTexture(pick(BUILDING_COLORS), rows) });
+  const wall = new THREE.MeshLambertMaterial({ map: windowTexture(color, rows) });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), [wall, wall, roofMat, roofMat, wall, wall]);
   mesh.position.y = h / 2;
   mesh.castShadow = true; mesh.receiveShadow = true;
@@ -171,47 +227,22 @@ export function buildCity(scene) {
     }
   }
 
-  // blocks: buildings + trees (kept clear of roads + sidewalks)
-  for (let i = 0; i < LINES - 1; i++) {
-    for (let j = 0; j < LINES - 1; j++) {
-      const x0 = linePos(i) + roadWidth(i) / 2 + 4.6;
-      const x1 = linePos(i + 1) - roadWidth(i + 1) / 2 - 4.6;
-      const z0 = linePos(j) + roadWidth(j) / 2 + 4.6;
-      const z1 = linePos(j + 1) - roadWidth(j + 1) / 2 - 4.6;
-      for (let li = 0; li < 2; li++) {
-        for (let lj = 0; lj < 2; lj++) {
-          const lx = x0 + (li + 0.5) * ((x1 - x0) / 2);
-          const lz = z0 + (lj + 0.5) * ((z1 - z0) / 2);
-          const lotW = (x1 - x0) / 2, lotD = (z1 - z0) / 2;
-          if (lotW < 10 || lotD < 10) continue;
-          if (Math.random() < 0.62) {
-            const w = rand(9, lotW - 3), d = rand(9, lotD - 3), h = rand(9, 34);
-            const b = makeBuilding(w, h, d);
-            b.position.x = lx + rand(-1, 1);
-            b.position.z = lz + rand(-1, 1);
-            scene.add(b);
-            solids.push({ minX: b.position.x - w / 2, maxX: b.position.x + w / 2, minZ: b.position.z - d / 2, maxZ: b.position.z + d / 2 });
-          } else if (Math.random() < 0.5) {
-            const t = makeTree();
-            t.position.set(lx + rand(-4, 4), 0, lz + rand(-4, 4));
-            scene.add(t);
-          }
-        }
-      }
-    }
+  // blocks: buildings + trees from the shared layout (same data the harness uses)
+  const layout = generateCityLayout();
+  installLayout(layout);
+  for (const b of layout.buildings) {
+    const mesh = makeBuilding(b.w, b.h, b.d, b.color);
+    mesh.position.x = b.x;
+    mesh.position.z = b.z;
+    scene.add(mesh);
+  }
+  for (const t of layout.trees) {
+    const tree = makeTree();
+    tree.position.set(t.x, 0, t.z);
+    scene.add(tree);
   }
 
-  // boundary fence
-  const fenceMat = new THREE.MeshLambertMaterial({ color: 0xd8d8d8 });
-  const stripeMat = new THREE.MeshLambertMaterial({ color: 0xd23b3b });
-  const F = BOUND + 2;
-  for (const [w, d, x, z] of [
-    [F * 2, 1.2, 0, -F], [F * 2, 1.2, 0, F], [1.2, F * 2, -F, 0], [1.2, F * 2, F, 0]]) {
-    const f = new THREE.Mesh(new THREE.BoxGeometry(w, 1.6, d), fenceMat);
-    f.position.set(x, 0.8, z); f.castShadow = true; scene.add(f);
-    const s = new THREE.Mesh(new THREE.BoxGeometry(w === 1.2 ? 1.3 : w, 0.4, d === 1.2 ? 1.3 : d), stripeMat);
-    s.position.set(x, 1.45, z); scene.add(s);
-  }
+  // (no boundary fence — the city wraps toroidally, there is no edge)
 
   // --- traffic lights (instanced: 1 pole + 2 heads + 6 lamps per intersection)
   const nX = LINES * LINES;
@@ -220,19 +251,18 @@ export function buildCity(scene) {
   const poleMesh = new THREE.InstancedMesh(poleGeo, new THREE.MeshLambertMaterial({ color: 0x2c2f34 }), nX);
   const headGeo = new THREE.BoxGeometry(0.55, 1.25, 0.4);
   const headMesh = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0x14161a }), nX * 2);
-  const lampGeo = new THREE.SphereGeometry(0.15, 8, 8);
+  const lampGeo = new THREE.SphereGeometry(0.23, 10, 10);
   const lampMesh = new THREE.InstancedMesh(lampGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), nX * 6);
   poleMesh.frustumCulled = headMesh.frustumCulled = lampMesh.frustumCulled = false;
 
   const lampBase = [];   // {x,y,z, axis:'x'|'z', slot:0|1|2} slot: 0 red,1 yellow,2 green
   let pi = 0, hi = 0, li = 0;
-  for (let i = 0; i < LINES; i++) {
-    for (let j = 0; j < LINES; j++) {
-      const px = linePos(i) + roadWidth(i) / 2 + 1.4;
-      const pz = linePos(j) + roadWidth(j) / 2 + 1.4;
+  for (const pole of layout.poles) {
+    const px = pole.x, pz = pole.z;
+    {
       dummy.position.set(px, 0, pz); dummy.rotation.set(0, 0, 0); dummy.updateMatrix();
       poleMesh.setMatrixAt(pi++, dummy.matrix);
-      poles.push({ x: px, z: pz, r: 0.55 });
+    }
       // head A faces the vertical road (controls x-axis traffic), offset toward intersection
       dummy.position.set(px - 0.9, 3.9, pz); dummy.updateMatrix();
       headMesh.setMatrixAt(hi++, dummy.matrix);
@@ -246,7 +276,6 @@ export function buildCity(scene) {
           lampMesh.setMatrixAt(li++, dummy.matrix);
         }
       }
-    }
   }
   scene.add(poleMesh, headMesh, lampMesh);
 

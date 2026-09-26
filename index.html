@@ -42,6 +42,11 @@
   #overStats { font-size:20px; font-weight:700; opacity:.9; }
   .hint { font-size:13px; opacity:.6; line-height:1.8; }
   .hint b { color:#ffd54a; }
+  /* ---------- version badge ---------- */
+  #ver { position:fixed; right:10px; bottom:calc(8px + env(safe-area-inset-bottom)); z-index:6;
+         color:#fff; opacity:.45; font-size:11px; font-weight:600; letter-spacing:.5px;
+         pointer-events:none; text-shadow:0 1px 3px rgba(0,0,0,.6); }
+  #menuVer { font-size:12px; opacity:.45; }
 </style>
 </head>
 <body>
@@ -61,6 +66,7 @@
   <div class="subtitle">Don't hesitate. Outrun the cops, dodge traffic,<br>miss the pedestrians — survive as long as you can.<br>One crash and the run is over.</div>
   <button class="bigbtn" id="btnStart">TAP TO START</button>
   <div class="hint"><b>◀ left half</b> turn left &nbsp;·&nbsp; <b>right half ▶</b> turn right<br><b>hold both</b> brake · keep holding at a stop to reverse</div>
+  <div class="hint" id="menuVer"></div>
 </div>
 
 <div class="overlay hidden" id="over">
@@ -69,6 +75,8 @@
   <button class="bigbtn" id="btnAgain">DRIVE AGAIN</button>
   <button class="ghostbtn" id="btnExit">EXIT</button>
 </div>
+
+<div id="ver"></div>
 
 <script type="importmap">
 {

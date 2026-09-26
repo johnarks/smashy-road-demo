@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { LINES, linePos, lanesFor, headingFor, lightPhase, axisGo, roadWidth, HALF } from './world.js';
+import { LINES, linePos, lanesFor, headingFor, lightPhase, axisGo, roadWidth, roadType, HALF, WRAP } from './world.js';
 
 // Traffic: ambient cars driving the lane network. They obey traffic lights,
 // queue behind each other, turn at intersections, brake for a stopped player,
@@ -16,6 +16,11 @@ function turnToward(cur, target, maxDelta) {
   let d = target - cur;
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
+  return cur + Math.max(-maxDelta, Math.min(maxDelta, d));
+}
+
+function moveToward(cur, target, maxDelta) {
+  const d = target - cur;
   return cur + Math.max(-maxDelta, Math.min(maxDelta, d));
 }
 
@@ -53,7 +58,7 @@ export class Traffic {
       axis, line, lanes, laneIdx, t,
       dir: lane.dir, speed: rand(6, 9), cruise: rand(10, 14),
       hCur: h, hTarget: h, node: -1,
-      lat: 0, evadeTarget: 0,            // lateral offset for evasion/shove
+      lat: 0, latVel: 0, evadeTarget: 0, evadeHold: 0,  // lateral offset for evasion/shove
       nerve: Math.random(),             // <0.3 freezes, mid brakes, high swerves
       shoveT: 0, shoveLat: 0,           // set when a cop slams into it
       _x: 0, _z: 0,
@@ -171,19 +176,25 @@ export class Traffic {
           want = 0;
         }
         // nerve <= 0.3: freeze — does nothing, stays unpredictable
+        car.evadeHold = 0.9;  // hold the dodge briefly so it never flickers in and out
       } else if (car.shoveT <= 0) {
-        car.evadeTarget = 0;
+        car.evadeHold -= dt;
+        if (car.evadeHold <= 0) { car.evadeHold = 0; car.evadeTarget = 0; }
       }
 
-      // integrate lateral offset (evasion easing + cop shove)
+      // integrate lateral offset (evasion + cop shove).
+      // Evasion is rate-limited to a lane-change-like 2.4 m/s: a deliberate
+      // swerve with the nose leading, never a sideways snap.
+      const prevLat = car.lat;
       if (car.shoveT > 0) {
         car.shoveT -= dt;
         car.lat += car.shoveLat * dt;
         car.shoveLat *= Math.max(0, 1 - 3 * dt);
       } else {
-        car.lat += (car.evadeTarget - car.lat) * Math.min(1, 5 * dt);
+        car.lat = moveToward(car.lat, car.evadeTarget, 2.4 * dt);
         car.lat = Math.max(-5.5, Math.min(5.5, car.lat));
       }
+      car.latVel = dt > 0 ? (car.lat - prevLat) / dt : 0;
 
       car.speed += Math.max(-24 * dt, Math.min(9 * dt, want - car.speed));
       if (car.speed < 0) car.speed = 0;
@@ -200,18 +211,32 @@ export class Traffic {
           while (hNew < -Math.PI) hNew += Math.PI * 2;
           const newAxis = car.axis === 'x' ? 'z' : 'x';
           const reqDir = newAxis === 'x' ? (Math.abs(hNew) < Math.PI / 2 ? 1 : -1) : (hNew > 0 ? 1 : -1);
+          // one-way target street: never turn into the oncoming direction — a
+          // wrong-way car meets traffic head-on and the pair deadlocks in the box.
+          // (Keep straight instead.)
+          const oneWayS = roadType(j) === 'oneway' ? (j % 2 === 0 ? 1 : -1) : 0;
+          if (oneWayS === 0 || reqDir === oneWayS) {
           const newLanes = lanesFor(newAxis, j);
           let bestL = 0, bestO = Infinity;
           newLanes.forEach((L, idx) => {
             if (L.dir === reqDir && Math.abs(L.offset) < bestO) { bestO = Math.abs(L.offset); bestL = idx; }
           });
-          const p = this.rawPos(car.axis, car.line, lane, 0, car.t);
+          // carry the world position (including any swerve offset) through the
+          // turn: project it into the new lane frame so the car never pops sideways
+          const p = this.rawPos(car.axis, car.line, lane, car.lat, car.t);
+          const nl = newLanes[bestL];
           car.axis = newAxis; car.line = j; car.lanes = newLanes; car.laneIdx = bestL;
           car.dir = reqDir;
-          car.t = newAxis === 'x' ? p.z : p.x;
+          if (newAxis === 'x') { car.t = p.z; car.lat = p.x - (linePos(j) + nl.offset); }
+          else { car.t = p.x; car.lat = p.z - (linePos(j) + nl.offset); }
+          car.lat = Math.max(-5.5, Math.min(5.5, car.lat));
           car.hTarget = hNew;
-          car.lat = 0; car.evadeTarget = 0;
-          car.node = newAxis === 'z' ? oldLine : j;
+          car.evadeTarget = 0; car.evadeHold = 0;
+          // the intersection just turned at, expressed as a node on the NEW
+          // axis, is always the old road (oldLine) — guard it so the car
+          // can't re-trigger and whip around twice in the same box
+          car.node = oldLine;
+          } // end one-way guard
         }
       }
       car.hCur = turnToward(car.hCur, car.hTarget, 4.5 * dt);
@@ -219,8 +244,15 @@ export class Traffic {
       const pos = this.rawPos(car.axis, car.line, car.lanes[car.laneIdx], car.lat, car.t);
       car._x = pos.x; car._z = pos.z;
 
-      // recycle cars that reached the map edge or are far from the player
-      if (Math.abs(car.t) > HALF + 8 || Math.hypot(pos.x - px, pos.z - pz) > 400) {
+      // toroidal city: cars loop around the edge instead of vanishing.
+      // WRAP is a multiple of the road pitch, so lanes stay aligned.
+      if (Math.abs(car.t) > HALF + 8) {
+        car.t += car.t > 0 ? -WRAP : WRAP;
+        car.node = -1;  // re-arm intersection logic at the new location
+        const pw = this.rawPos(car.axis, car.line, car.lanes[car.laneIdx], car.lat, car.t);
+        car._x = pw.x; car._z = pw.z;
+      } else if (Math.hypot(pos.x - px, pos.z - pz) > 400) {
+        // recycle cars that wandered far from the player (density management)
         this.respawn(i, px, pz);
         const c2 = this.cars[i];
         const p2 = this.rawPos(c2.axis, c2.line, c2.lanes[c2.laneIdx], 0, c2.t);
@@ -229,8 +261,10 @@ export class Traffic {
 
       const c3 = this.cars[i];
       this.dummy.position.set(c3._x, 0, c3._z);
-      // lean into the swerve so evasion reads visually
-      const wobble = c3.shoveT > 0 ? Math.sin(c3.shoveT * 20) * 0.35 : c3.lat * 0.09;
+      // yaw into the swerve: the nose leads the lateral motion like a real
+      // lane change, instead of the body drafting sideways while pointing straight
+      const wobble = c3.shoveT > 0 ? Math.sin(c3.shoveT * 20) * 0.35
+        : Math.max(-0.35, Math.min(0.35, (c3.latVel || 0) * 0.12));
       this.dummy.rotation.set(0, c3.hCur + wobble, 0);
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);
